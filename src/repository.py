@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
 from .rules import ID_PREFIX, STATES
+from .voyage_rules import WINDOW_STATES
 
 
 class Repository:
@@ -24,6 +25,7 @@ class Repository:
 
     def _create_schema(self) -> None:
         statuses = ",".join("'" + s.replace("'", "''") + "'" for s in STATES)
+        window_statuses = ",".join("'" + s + "'" for s in WINDOW_STATES)
         with self.conn:
             self.conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS items (
@@ -65,6 +67,27 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS voyage_windows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    vessel TEXT NOT NULL,
+                    departure_at TEXT NOT NULL,
+                    return_at TEXT NOT NULL,
+                    estimated_qty REAL NOT NULL,
+                    sea_state INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ({window_statuses})),
+                    hold_reason TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    recovered_qty REAL,
+                    separated_oil_qty REAL,
+                    separated_water_qty REAL,
+                    separation_result TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_voyage_windows_item
+                    ON voyage_windows(item_id);
             """)
 
     @staticmethod
@@ -156,6 +179,90 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def create_voyage_window(self, item_id: int, vessel: str, departure_at: str,
+                             return_at: str, estimated_qty: float, sea_state: int,
+                             status: str, hold_reason: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO voyage_windows(item_id, vessel, departure_at, return_at,
+                   estimated_qty, sea_state, status, hold_reason, version,
+                   created_by, created_at, updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,1,?,?,?)""",
+                (item_id, vessel, departure_at, return_at, estimated_qty, sea_state,
+                 status, hold_reason, actor, now, now),
+            )
+            window_id = int(cur.lastrowid)
+        return self.get_voyage_window(window_id)
+
+    def get_voyage_window(self, window_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM voyage_windows WHERE id=?", (window_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("出航窗口不存在")
+        return dict(row)
+
+    def list_voyage_windows(self, status: Optional[str] = None,
+                            item_id: Optional[int] = None,
+                            vessel: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM voyage_windows"
+        clauses, params = [], []
+        if status:
+            clauses.append("status=?"); params.append(status)
+        if item_id is not None:
+            clauses.append("item_id=?"); params.append(item_id)
+        if vessel:
+            clauses.append("vessel=?"); params.append(vessel)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY departure_at, id"
+        with self._lock:
+            rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_voyage_window(self, window_id: int, values: Dict[str, Any],
+                             expected_version: Optional[int],
+                             actor: str) -> Dict[str, Any]:
+        values = dict(values)
+        values["updated_at"] = utc_now()
+        columns = ", ".join(f"{key}=?" for key in values)
+        sql = (f"UPDATE voyage_windows SET {columns}, version=version+1 "
+               "WHERE id=?")
+        params = list(values.values()) + [window_id]
+        if expected_version is not None:
+            sql += " AND version=?"
+            params.append(expected_version)
+        with self._lock, self.conn:
+            cur = self.conn.execute(sql, tuple(params))
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM voyage_windows WHERE id=?", (window_id,)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("出航窗口不存在")
+                raise ConflictError("版本冲突，请刷新后重试")
+        del actor
+        return self.get_voyage_window(window_id)
+
+    def recovery_progress(self, item_id: int) -> Dict[str, float]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT
+                       COALESCE(SUM(estimated_qty),0) AS estimated_qty,
+                       COALESCE(SUM(recovered_qty),0) AS recovered_qty,
+                       COALESCE(SUM(separated_oil_qty),0) AS separated_oil_qty,
+                       COALESCE(SUM(separated_water_qty),0) AS separated_water_qty,
+                       COUNT(*) AS completed_count
+                   FROM voyage_windows
+                   WHERE item_id=? AND status='completed'""",
+                (item_id,),
+            ).fetchone()
+        return {key: float(row[key]) for key in
+                ("estimated_qty", "recovered_qty", "separated_oil_qty",
+                 "separated_water_qty", "completed_count")}
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

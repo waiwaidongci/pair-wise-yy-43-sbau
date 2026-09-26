@@ -71,7 +71,8 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            self._json(status, {"error": exc.__class__.__name__, "message": str(exc),
+                                **({"details": exc.details} if getattr(exc, "details", None) else {})})
 
         def do_GET(self) -> None:
             try:
@@ -84,6 +85,11 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"items": service.list_items(role)})
+                elif path.startswith("/api/items/") and path.endswith("/voyage-progress"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.voyage_progress(item_id, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     actor, role = self._identity()
@@ -98,6 +104,20 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path == "/api/voyage-windows":
+                    actor, role = self._identity()
+                    del actor
+                    query = parse_qs(urlparse(self.path).query)
+                    status = query.get("status", [None])[0]
+                    item_id = query.get("item_id", [None])[0]
+                    item_id = int(item_id) if item_id is not None else None
+                    self._json(200, {"windows": service.list_voyage_windows(
+                        role, status=status, item_id=item_id)})
+                elif path.startswith("/api/voyage-windows/"):
+                    window_id = int(path.rsplit("/", 1)[-1])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_voyage_window(window_id, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -110,6 +130,21 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/voyage-windows"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.schedule_voyage_window(
+                        item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/voyage-progress"):
+                    item_id = int(path.split("/")[3])
+                    self._json(200, service.voyage_progress(item_id, role))
+                elif path.startswith("/api/voyage-windows/") and path.endswith("/reconfirm"):
+                    window_id = int(path.split("/")[3])
+                    self._json(200, service.reconfirm_voyage_window(
+                        window_id, body, actor, role))
+                elif path.startswith("/api/voyage-windows/") and path.endswith("/return"):
+                    window_id = int(path.split("/")[3])
+                    self._json(200, service.register_voyage_return(
+                        window_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
