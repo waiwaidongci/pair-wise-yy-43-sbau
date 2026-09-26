@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 class ErrorKind:
     VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"
@@ -9,7 +10,9 @@ class DomainError(Exception):
 class ValidationError(DomainError): kind=ErrorKind.VALIDATION
 class NotFoundError(DomainError): kind=ErrorKind.NOT_FOUND
 class PermissionDenied(DomainError): kind=ErrorKind.FORBIDDEN
-class ConflictError(DomainError): kind=ErrorKind.CONFLICT
+class ConflictError(DomainError):
+    kind=ErrorKind.CONFLICT
+    def __init__(self,message,details=None): super().__init__(message); self.details=details
 SEVERITIES=['minor', 'moderate', 'major', 'catastrophic']; STATES=['reported', 'assessing', 'containing', 'recovering', 'monitoring', 'closed']; ROLES=['observer', 'response_commander', 'operations', 'viewer']
 @dataclass(frozen=True)
 class Item:
@@ -34,5 +37,13 @@ def require_number(value,field,minimum=0.0):
     except (TypeError,ValueError): raise ValidationError(f"{field}必须是数字")
     if number<minimum: raise ValidationError(f"{field}不能小于{minimum}")
     return number
+def require_moment(value,field):
+    if not isinstance(value,str) or not value.strip(): raise ValidationError(f"{field}必须是ISO 8601时间字符串")
+    text=value.strip()
+    if text.endswith(("Z","z")): text=text[:-1]+"+00:00"
+    try: moment=datetime.fromisoformat(text)
+    except ValueError: raise ValidationError(f"{field}必须是ISO 8601时间字符串")
+    if moment.tzinfo is None: moment=moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 def ensure_role(role,allowed):
     if role not in allowed: raise PermissionDenied("当前角色无权执行该操作")

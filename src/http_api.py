@@ -71,7 +71,11 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            payload = {"error": exc.__class__.__name__, "message": str(exc)}
+            details = getattr(exc, "details", None)
+            if details is not None:
+                payload["details"] = details
+            self._json(status, payload)
 
         def do_GET(self) -> None:
             try:
@@ -89,6 +93,23 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/windows"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    query = parse_qs(urlparse(self.path).query)
+                    self._json(200, {"windows": service.list_windows(
+                        role, item_id=item_id,
+                        status=query.get("status", [None])[0])})
+                elif path == "/api/windows":
+                    actor, role = self._identity()
+                    del actor
+                    query = parse_qs(urlparse(self.path).query)
+                    item_id = query.get("item_id", [None])[0]
+                    self._json(200, {"windows": service.list_windows(
+                        role, item_id=int(item_id) if item_id else None,
+                        status=query.get("status", [None])[0],
+                        ship_name=query.get("ship_name", [None])[0])})
                 elif path.startswith("/api/items/"):
                     item_id = int(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
@@ -119,6 +140,16 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/windows"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.create_window(item_id, body, actor, role))
+                elif path.startswith("/api/windows/") and path.endswith("/confirm"):
+                    window_id = int(path.split("/")[3])
+                    self._json(200, service.confirm_window(window_id, body, actor, role))
+                elif path.startswith("/api/windows/") and path.endswith("/return"):
+                    window_id = int(path.split("/")[3])
+                    self._json(200, service.register_window_return(
+                        window_id, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

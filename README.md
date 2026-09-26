@@ -30,9 +30,22 @@ python3 app.py --db ./data.db --port 8320
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `POST /api/items/{id}/windows`，登记航窗口（船名、离港/回港时刻、预计回收量、海况）
+- `GET /api/items/{id}/windows?status=`
+- `GET /api/windows?status=&item_id=&ship_name=`
+- `POST /api/windows/{id}/confirm`，复测后重新确认留待重排的窗口
+- `POST /api/windows/{id}/return`，回港登记回收量与油水分离结果
 - `GET /api/audit`
 
 允许角色：observer, response_commander, operations, viewer。估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。
+
+## 航窗口台账
+
+事件进入围控（`containing`）后才可登记航窗口；窗口覆盖离港到回港全程（含往返航行与卸油），同一艘船的已排期窗口时间重叠时返回`409`及冲突安排。判定在`src/rules.py`，台账在`src/repository.py`，请求入口在`src/http_api.py`。
+
+- 海况超过四级或预计回收量不足事件油量一成时，窗口记为`pending_reschedule`（留待重排）并登记原因；复测后通过`confirm`重新提交时刻、海况和预计回收量，再次判定与查冲突。
+- 回港登记实际回收量和油水分离结果后窗口转为`completed`，才计入进度；事件详情的`recovery_progress`给出三类数量：预计回收、实际回收、分离净油。
+- 台账列表支持按`status`（scheduled / pending_reschedule / completed）等条件查看。
 
 ## 测试
 
